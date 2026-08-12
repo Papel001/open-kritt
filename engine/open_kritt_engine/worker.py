@@ -1408,7 +1408,10 @@ class Worker:
                 except (HarnessError, OutputValidationError, ValueError) as exc:
                     last_exception = exc
                     if isinstance(exc, HarnessError):
-                        last_error = f"{exc.public_message} Diagnostic: {exc.code}."
+                        if getattr(exc, "harness", None) == "vllm":
+                            last_error = f"{str(exc)} Diagnostic: {exc.code}."
+                        else:
+                            last_error = f"{exc.public_message} Diagnostic: {exc.code}."
                     else:
                         last_error = str(exc)
                     attempt_error = f"attempt {attempt}: {last_error}"

@@ -1,4 +1,4 @@
-export const MODEL_PROVIDER_IDS = ['codex', 'claude', 'openrouter'];
+export const MODEL_PROVIDER_IDS = ['codex', 'claude', 'openrouter', 'vllm'];
 export const MODEL_CATALOG_STATUSES = ['ready', 'loading', 'unavailable'];
 const SAFE_MODEL_NOTE_URLS = new Set(['https://chatgpt.com/cyber']);
 
@@ -8,6 +8,7 @@ const PROVIDER_HARNESSES = {
   // Claude Code has first-class OpenRouter support. Codex remains available
   // for advanced installations with a matching Codex provider configuration.
   openrouter: ['claude-code', 'codex'],
+  vllm: ['vllm'],
 };
 
 const PROVIDER_DEFAULT_MODELS = {
@@ -20,11 +21,13 @@ const PROVIDER_THINKING_EFFORTS = {
   codex: ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
   claude: ['low', 'medium', 'high', 'xhigh', 'max'],
   openrouter: ['default', 'low', 'medium', 'high', 'xhigh', 'max'],
+  vllm: ['default'],
 };
 
 const HARNESS_THINKING_EFFORTS = {
   codex: ['default', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
   'claude-code': ['default', 'low', 'medium', 'high', 'xhigh', 'max'],
+  vllm: ['default'],
 };
 
 function normalizedProviderId(provider) {

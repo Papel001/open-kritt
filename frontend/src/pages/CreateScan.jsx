@@ -1028,6 +1028,35 @@ export default function CreateScan() {
               depths={selectedWorkflowDepths}
               depthChips={selectedWorkflow?.depthChips || []}
             />
+
+<pre
+  style={{
+    marginTop: 12,
+    padding: 12,
+    border: '1px solid var(--border)',
+    borderRadius: 8,
+    fontSize: 11,
+    whiteSpace: 'pre-wrap',
+  }}
+>
+  {JSON.stringify(
+    {
+      valid: modelConfigurationValid,
+      provider: form.model_provider,
+      model: form.model,
+      harness: form.harness,
+      thinking_effort: form.thinking_effort,
+      post_processing_thinking_effort: form.post_processing_thinking_effort,
+      model_overrides: form.model_overrides,
+      configuredProviders: modelProviders,
+      depths: selectedWorkflowDepths,
+      catalog: refData.modelCatalog?.vllm,
+    },
+    null,
+    2
+  )}
+</pre>
+
           </div>
 
           {/* ===================== AGENT SKILLS ===================== */}

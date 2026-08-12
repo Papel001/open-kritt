@@ -1,3 +1,4 @@
+import { useEffect } from 'react';
 import ModelConfiguration, {
   THINKING_EFFORTS,
   modelConfigurationForCatalog,
@@ -90,6 +91,28 @@ export default function WorkflowModelConfiguration({
   );
   const postProcessingThinkingEffort =
     value?.post_processing_thinking_effort ?? value?.postProcessingThinkingEffort ?? value?.thinking_effort;
+
+  useEffect(() => {
+    const normalizedPostProcessingEffort = thinkingEffortForModelChange(
+      postProcessingThinkingEffort,
+      postProcessingEfforts
+    );
+
+    if (
+      normalizedPostProcessingEffort &&
+      normalizedPostProcessingEffort !== postProcessingThinkingEffort
+    ) {
+      onChange({
+        ...value,
+        post_processing_thinking_effort: normalizedPostProcessingEffort,
+      });
+    }
+  }, [
+    postProcessingThinkingEffort,
+    postProcessingEfforts,
+    value,
+    onChange,
+  ]);
 
   const useSingleModel = () => onChange({ ...value, model_overrides: {} });
   const customizeByDepth = () =>

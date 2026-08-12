@@ -64,7 +64,6 @@ CLI has no install step.
 ```bash
 git clone https://github.com/Kritt-ai/open-kritt
 cd open-kritt
-./kritt setup
 ./kritt start
 ```
 

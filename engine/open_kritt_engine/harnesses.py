@@ -1,11 +1,13 @@
 import hashlib
 import json
+import logging
 import os
 import re
 import shutil
 import subprocess
 import tempfile
 import time
+import requests
 from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -135,6 +137,8 @@ class CodexJsonlResult:
     source_text: str | None = None
 
 
+LOGGER = logging.getLogger("open_kritt_engine.harnesses")
+
 SUBAGENT_TOOL_NAMES = {
     "subagent",
     "subagents",
@@ -169,7 +173,7 @@ CLAUDE_MODEL_ALIASES = {
     "opus-4.8": "claude-opus-4-8",
 }
 DEFAULT_MODEL_PROVIDER = "openrouter"
-MODEL_PROVIDERS = {"codex", "claude", "openrouter"}
+MODEL_PROVIDERS = {"codex", "claude", "openrouter", "vllm"}
 CLAUDE_WORKSPACE_SYSTEM_PROMPT = (
     "Use only files under the current working directory and dependency paths listed in WORKSPACE.json. "
     "Do not search from filesystem root (/), /data, /root, /home, or other global paths. "
@@ -1838,6 +1842,855 @@ class CursorHarness:
             usage = {**provider_info, **(usage or {})}
         return HarnessResult(payload=payload, usage=usage, output=process_output)
 
+class LocalOpenAIHarness:
+    name = "local-openai"
+
+    def __init__(
+        self,
+        timeout_seconds: int,
+        model_provider: str | None = None,
+    ):
+        self.timeout_seconds = timeout_seconds
+        self.model_provider = model_provider
+
+    def run(
+        self,
+        *,
+        prompt: str,
+        schema: dict[str, Any],
+        repo_dir: str,
+        model: str,
+        thinking_effort: str | None = None,
+        env: dict[str, str] | None = None,
+        allow_tools: bool = True,
+        runner_image: str | None = None,
+    ) -> HarnessResult:
+        raise NotImplementedError("LocalOpenAIHarness not implemented yet")
+
+VLLM_MAX_TOOL_STEPS = 24
+VLLM_MAX_LIST_FILES = 300
+VLLM_MAX_READ_LINES = 400
+VLLM_MAX_SEARCH_RESULTS = 80
+VLLM_MAX_SEARCH_FILE_BYTES = 2_000_000
+VLLM_MAX_TOOL_OUTPUT_CHARS = 12_000
+
+VLLM_SKIPPED_DIRS = {
+    ".git",
+    ".data",
+    ".venv",
+    "venv",
+    "node_modules",
+    "__pycache__",
+}
+
+
+def _vllm_repo_path(repo_dir: str, requested_path: str | None = None) -> Path:
+    root = Path(repo_dir).resolve()
+    requested = str(requested_path or ".").strip() or "."
+    candidate = (root / requested).resolve()
+
+    try:
+        candidate.relative_to(root)
+    except ValueError as exc:
+        raise ValueError("requested path is outside the repository") from exc
+
+    return candidate
+
+
+def _vllm_relative_path(repo_dir: str, path: Path) -> str:
+    root = Path(repo_dir).resolve()
+    return str(path.resolve().relative_to(root))
+
+
+def _vllm_should_skip(path: Path, repo_dir: str) -> bool:
+    try:
+        relative = path.relative_to(Path(repo_dir).resolve())
+    except ValueError:
+        return True
+
+    if any(part in VLLM_SKIPPED_DIRS for part in relative.parts):
+        return True
+
+    name = path.name.lower()
+
+    # Never expose runtime environment files to the model.
+    if name == ".env" or (name.startswith(".env.") and name != ".env.example"):
+        return True
+
+    return False
+
+
+def _vllm_list_files(repo_dir: str, requested_path: str = ".") -> dict[str, Any]:
+    base = _vllm_repo_path(repo_dir, requested_path)
+
+    if not base.exists():
+        return {
+            "ok": False,
+            "error": f"path does not exist: {requested_path}",
+        }
+
+    if base.is_file():
+        return {
+            "ok": True,
+            "files": [_vllm_relative_path(repo_dir, base)],
+            "truncated": False,
+        }
+
+    files: list[str] = []
+    truncated = False
+
+    for candidate in sorted(base.rglob("*"), key=lambda item: str(item)):
+        if candidate.is_symlink():
+            continue
+
+        if _vllm_should_skip(candidate, repo_dir):
+            continue
+
+        if not candidate.is_file():
+            continue
+
+        files.append(_vllm_relative_path(repo_dir, candidate))
+
+        if len(files) >= VLLM_MAX_LIST_FILES:
+            truncated = True
+            break
+
+    return {
+        "ok": True,
+        "path": requested_path,
+        "files": files,
+        "truncated": truncated,
+    }
+
+
+def _vllm_read_file(
+    repo_dir: str,
+    requested_path: str,
+    start_line: int = 1,
+    end_line: int | None = None,
+) -> dict[str, Any]:
+    path = _vllm_repo_path(repo_dir, requested_path)
+
+    if not path.exists():
+        return {
+            "ok": False,
+            "error": f"file does not exist: {requested_path}",
+        }
+
+    if not path.is_file():
+        return {
+            "ok": False,
+            "error": f"path is not a file: {requested_path}",
+        }
+
+    if path.is_symlink():
+        return {
+            "ok": False,
+            "error": "symbolic links are not readable through the vLLM harness",
+        }
+
+    try:
+        start = max(1, int(start_line))
+    except (TypeError, ValueError):
+        start = 1
+
+    try:
+        requested_end = int(end_line) if end_line is not None else start + 199
+    except (TypeError, ValueError):
+        requested_end = start + 199
+
+    end = max(start, requested_end)
+    end = min(end, start + VLLM_MAX_READ_LINES - 1)
+
+    lines: list[str] = []
+    last_line = start - 1
+
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as handle:
+            for line_number, line in enumerate(handle, start=1):
+                if line_number < start:
+                    continue
+
+                if line_number > end:
+                    break
+
+                lines.append(f"{line_number}: {line.rstrip()}")
+                last_line = line_number
+    except OSError as exc:
+        return {
+            "ok": False,
+            "error": f"could not read file: {exc}",
+        }
+
+    return {
+        "ok": True,
+        "path": _vllm_relative_path(repo_dir, path),
+        "start_line": start,
+        "end_line": last_line,
+        "content": "\n".join(lines),
+    }
+
+
+def _vllm_search_text(
+    repo_dir: str,
+    query: str,
+    requested_path: str = ".",
+) -> dict[str, Any]:
+    needle = str(query or "").strip()
+
+    if not needle:
+        return {
+            "ok": False,
+            "error": "search query is required",
+        }
+
+    base = _vllm_repo_path(repo_dir, requested_path)
+
+    if not base.exists():
+        return {
+            "ok": False,
+            "error": f"path does not exist: {requested_path}",
+        }
+
+    candidates = [base] if base.is_file() else base.rglob("*")
+    matches: list[dict[str, Any]] = []
+    scanned_files = 0
+    truncated = False
+
+    for candidate in candidates:
+        if candidate.is_symlink():
+            continue
+
+        if _vllm_should_skip(candidate, repo_dir):
+            continue
+
+        if not candidate.is_file():
+            continue
+
+        try:
+            if candidate.stat().st_size > VLLM_MAX_SEARCH_FILE_BYTES:
+                continue
+        except OSError:
+            continue
+
+        scanned_files += 1
+
+        try:
+            with candidate.open("r", encoding="utf-8", errors="replace") as handle:
+                for line_number, line in enumerate(handle, start=1):
+                    if needle.casefold() not in line.casefold():
+                        continue
+
+                    matches.append(
+                        {
+                            "path": _vllm_relative_path(repo_dir, candidate),
+                            "line": line_number,
+                            "text": line.rstrip()[:500],
+                        }
+                    )
+
+                    if len(matches) >= VLLM_MAX_SEARCH_RESULTS:
+                        truncated = True
+                        break
+        except (OSError, UnicodeError):
+            continue
+
+        if truncated:
+            break
+
+    return {
+        "ok": True,
+        "query": needle,
+        "path": requested_path,
+        "matches": matches,
+        "scanned_files": scanned_files,
+        "truncated": truncated,
+    }
+
+
+def _vllm_execute_repo_tool(
+    repo_dir: str,
+    action: dict[str, Any],
+) -> dict[str, Any]:
+    tool = str(action.get("tool") or "").strip()
+
+    try:
+        if tool == "list_files":
+            return _vllm_list_files(
+                repo_dir,
+                str(action.get("path") or "."),
+            )
+
+        if tool == "read_file":
+            requested_path = str(action.get("path") or "").strip()
+
+            if not requested_path:
+                return {
+                    "ok": False,
+                    "error": "read_file requires path",
+                }
+
+            return _vllm_read_file(
+                repo_dir,
+                requested_path,
+                action.get("start_line", 1),
+                action.get("end_line"),
+            )
+
+        if tool == "search_text":
+            return _vllm_search_text(
+                repo_dir,
+                str(action.get("query") or ""),
+                str(action.get("path") or "."),
+            )
+
+        return {
+            "ok": False,
+            "error": f"unknown tool: {tool}",
+        }
+
+    except (OSError, ValueError) as exc:
+        return {
+            "ok": False,
+            "error": str(exc),
+        }
+
+
+def _vllm_merge_usage(
+    total: dict[str, Any],
+    usage: Any,
+) -> None:
+    if not isinstance(usage, dict):
+        return
+
+    for key, value in usage.items():
+        if isinstance(value, (int, float)):
+            total[key] = total.get(key, 0) + value
+        elif key not in total:
+            total[key] = value
+
+
+
+def _vllm_turn_schema(
+    final_schema: dict[str, Any],
+    allow_tools: bool,
+) -> dict[str, Any]:
+    if not allow_tools:
+        return final_schema
+
+    return {
+        "anyOf": [
+            {
+                "type": "object",
+                "properties": {
+                    "type": {"const": "tool"},
+                    "tool": {"const": "list_files"},
+                    "path": {"type": "string"},
+                },
+                "required": ["type", "tool"],
+                "additionalProperties": False,
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "type": {"const": "tool"},
+                    "tool": {"const": "read_file"},
+                    "path": {"type": "string"},
+                    "start_line": {"type": "integer", "minimum": 1},
+                    "end_line": {"type": "integer", "minimum": 1},
+                },
+                "required": ["type", "tool", "path"],
+                "additionalProperties": False,
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "type": {"const": "tool"},
+                    "tool": {"const": "search_text"},
+                    "query": {"type": "string"},
+                    "path": {"type": "string"},
+                },
+                "required": ["type", "tool", "query"],
+                "additionalProperties": False,
+            },
+            {
+                **{
+                    key: value
+                    for key, value in final_schema.items()
+                    if key not in {"type", "properties", "required"}
+                },
+                "type": "object",
+                "properties": {
+                    "type": {"const": "final"},
+                    **final_schema.get("properties", {}),
+                },
+                "required": [
+                    "type",
+                    *final_schema.get("required", []),
+                ],
+                "additionalProperties": False,
+            },
+        ]
+    }
+
+
+class VLLMHarness:
+    name = "vllm"
+
+    def __init__(self, timeout_seconds: int, model_provider: str | None = None):
+        self.timeout_seconds = timeout_seconds
+        self.model_provider = model_provider
+
+    def run(
+        self,
+        *,
+        prompt: str,
+        schema: dict[str, Any],
+        repo_dir: str,
+        model: str,
+        thinking_effort: str | None = None,
+        env: dict[str, str] | None = None,
+        allow_tools: bool = True,
+        runner_image: str | None = None,
+    ) -> HarnessResult:
+        actual_env = env if env is not None else _base_env()
+
+        base_url = (
+            actual_env.get("VLLM_BASE_URL")
+            or actual_env.get("OPENAI_BASE_URL")
+            or "http://127.0.0.1:8000/v1"
+        ).rstrip("/")
+
+        headers = {
+            "Content-Type": "application/json",
+        }
+
+        api_key = actual_env.get("VLLM_API_KEY")
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+
+        # The extractor helper is an internal Open-Kritt marker.
+        # The model should generate only the semantic workflow output;
+        # VLLMHarness adds the constant helper field before validation.
+        model_schema = json.loads(json.dumps(schema))
+
+        model_properties = model_schema.get("properties")
+        if isinstance(model_properties, dict):
+            model_properties.pop(EXTRACTOR_HELPER_FIELD, None)
+
+        model_required = model_schema.get("required")
+        if isinstance(model_required, list):
+            model_schema["required"] = [
+                field
+                for field in model_required
+                if field != EXTRACTOR_HELPER_FIELD
+            ]
+
+        tool_instructions = """
+You have read-only access to the checked-out repository.
+
+When you need repository information, return ONLY one JSON object in one
+of these forms:
+
+{"type":"tool","tool":"list_files","path":"."}
+
+{"type":"tool","tool":"read_file","path":"src/example.py","start_line":1,"end_line":200}
+
+{"type":"tool","tool":"search_text","query":"dangerous_function","path":"."}
+
+You may make multiple repository requests, one at a time.
+
+When your analysis is complete, return one JSON object with
+"type":"final" plus all fields required by the Open-Kritt JSON schema
+at the same top level.
+
+All fields other than "type" must satisfy the Open-Kritt JSON schema below.
+
+Do not use markdown fences.
+Do not invent file contents.
+Do not claim code evidence you have not inspected.
+""" if allow_tools else """
+Repository tools are disabled for this request.
+
+Return the final Open-Kritt JSON directly.
+Do not use markdown fences.
+"""
+
+        system_prompt = (
+            "You are an Open-Kritt analysis agent.\n\n"
+            + tool_instructions
+            + "\nOpen-Kritt final JSON schema:\n"
+            + json.dumps(model_schema, separators=(",", ":"))
+        )
+
+        turn_schema = _vllm_turn_schema(model_schema, allow_tools)
+
+        messages: list[dict[str, str]] = [
+            {
+                "role": "system",
+                "content": system_prompt,
+            },
+            {
+                "role": "user",
+                "content": prompt,
+            },
+        ]
+
+        usage_total: dict[str, Any] = {}
+        deadline = time.monotonic() + self.timeout_seconds
+        successful_repo_reads = 0
+
+        for _step in range(VLLM_MAX_TOOL_STEPS):
+            remaining = deadline - time.monotonic()
+
+            if remaining <= 0:
+                raise HarnessError(
+                    "vLLM harness timed out.",
+                    code="timeout",
+                    harness="vllm",
+                )
+
+            request_schema = turn_schema
+
+            if allow_tools:
+                request_schema = json.loads(json.dumps(turn_schema))
+                branches = request_schema.get("anyOf")
+
+                if isinstance(branches, list):
+
+                    # Discovery phase:
+                    # allow repository tools, but not final output.
+                    if successful_repo_reads == 0 and _step < 3:
+                        request_schema["anyOf"] = [
+                            branch
+                            for branch in branches
+                            if (
+                                branch.get("properties", {})
+                                .get("type", {})
+                                .get("const")
+                                != "final"
+                            )
+                        ]
+
+                    # Reading phase:
+                    # after a few discovery turns, require an actual file read.
+                    elif successful_repo_reads == 0:
+                        request_schema["anyOf"] = [
+                            branch
+                            for branch in branches
+                            if (
+                                branch.get("properties", {})
+                                .get("tool", {})
+                                .get("const")
+                                == "read_file"
+                            )
+                        ]
+
+                    # Finalization phase:
+                    # once repository files were inspected and enough analysis
+                    # turns have elapsed, switch to the final schema itself.
+                    # Do not leave it wrapped inside anyOf.
+                    elif _step >= 8:
+                        final_branch = next(
+                            (
+                                branch
+                                for branch in branches
+                                if (
+                                    branch.get("properties", {})
+                                    .get("type", {})
+                                    .get("const")
+                                    == "final"
+                                )
+                            ),
+                            None,
+                        )
+
+                        if final_branch is not None:
+                            request_schema = json.loads(
+                                json.dumps(final_branch)
+                            )
+
+                        if _step == 8:
+                            messages.append(
+                                {
+                                    "role": "user",
+                                    "content": (
+                                        "Repository inspection is now complete. "
+                                        "Do not request any more repository tools. "
+                                        "Return the final Open-Kritt JSON result now."
+                                    ),
+                                }
+                            )
+
+            try:
+                response = requests.post(
+                    f"{base_url}/chat/completions",
+                    headers=headers,
+                    timeout=max(1.0, remaining),
+                    json={
+                        "model": model,
+                        "messages": messages,
+                        "temperature": 0,
+                        "chat_template_kwargs": {
+                            "enable_thinking": False,
+                        },
+                        "structured_outputs": {
+                            "json": request_schema,
+                        },
+                    },
+                )
+
+                response.raise_for_status()
+
+            except requests.RequestException as exc:
+                response_detail = ""
+
+                if getattr(exc, "response", None) is not None:
+                    try:
+                        response_detail = exc.response.text[:2000]
+                    except Exception:
+                        response_detail = ""
+
+                detail_suffix = (
+                    f" Response: {response_detail}"
+                    if response_detail
+                    else ""
+                )
+
+                error_message = f"vLLM request failed: {exc}.{detail_suffix}"
+
+                raise HarnessError(
+                    error_message,
+                    code="start_failed",
+                    public_message=error_message,
+                    harness="vllm",
+                ) from exc
+
+            try:
+                data = response.json()
+                message = data["choices"][0]["message"]
+
+                content = message.get("content")
+
+                # Some reasoning-capable models, including Qwen variants served
+                # by vLLM, may place structured output in `reasoning` while
+                # leaving `content` null.
+                if not isinstance(content, str) or not content.strip():
+                    content = message.get("reasoning")
+
+            except (ValueError, KeyError, IndexError, TypeError) as exc:
+                raise HarnessError(
+                    "vLLM returned an invalid Chat Completions response.",
+                    code="invalid_output",
+                    harness="vllm",
+                ) from exc
+
+            _vllm_merge_usage(usage_total, data.get("usage"))
+
+            if not isinstance(content, str) or not content.strip():
+                raise HarnessError(
+                    "vLLM returned an empty response.",
+                    code="invalid_output",
+                    harness="vllm",
+                )
+
+            content = content.strip()
+
+            # Remove JSON markdown wrappers sometimes emitted by reasoning models.
+            if content.startswith("```") and content.endswith("```"):
+                content = re.sub(r"^```(?:json)?\s*", "", content, flags=re.IGNORECASE)
+                content = re.sub(r"\s*```$", "", content)
+                content = content.strip()
+
+            elif content.lower().startswith("`json") and content.endswith("`"):
+                content = content[5:-1].strip()
+
+            elif content.startswith("`") and content.endswith("`"):
+                content = content[1:-1].strip()
+
+            try:
+                action = json.loads(content)
+            except json.JSONDecodeError as exc:
+                raise HarnessError(
+                    "vLLM did not return valid JSON.",
+                    output=content,
+                    code="invalid_output",
+                    harness="vllm",
+                ) from exc
+
+            force_final = (
+                allow_tools
+                and successful_repo_reads > 0
+                and _step >= 8
+            )
+
+            # Once the investigation budget is complete, repository tools
+            # are no longer executed. The model must produce its final result.
+            if (
+                force_final
+                and isinstance(action, dict)
+                and action.get("type") == "tool"
+            ):
+                LOGGER.info(
+                    "vLLM rejected repo tool during finalization: "
+                    "step=%s tool=%s path=%s successful_reads=%s",
+                    _step + 1,
+                    action.get("tool"),
+                    action.get("path"),
+                    successful_repo_reads,
+                )
+
+                messages.append(
+                    {
+                        "role": "assistant",
+                        "content": content,
+                    }
+                )
+
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            "The repository inspection phase has ended. "
+                            "Do not request another tool. "
+                            "Using the repository evidence already collected, "
+                            "return the final Open-Kritt JSON result now."
+                        ),
+                    }
+                )
+
+                continue
+
+            if (
+                allow_tools
+                and isinstance(action, dict)
+                and action.get("type") == "tool"
+            ):
+                tool_result = _vllm_execute_repo_tool(repo_dir, action)
+
+                LOGGER.info(
+                    "vLLM repo tool step=%s tool=%s path=%s ok=%s error=%s successful_reads=%s",
+                    _step + 1,
+                    action.get("tool"),
+                    action.get("path"),
+                    tool_result.get("ok") if isinstance(tool_result, dict) else None,
+                    tool_result.get("error") if isinstance(tool_result, dict) else None,
+                    successful_repo_reads,
+                )
+
+                if (
+                    action.get("tool") == "read_file"
+                    and isinstance(tool_result, dict)
+                    and tool_result.get("ok") is True
+                ):
+                    successful_repo_reads += 1
+
+                tool_text = json.dumps(
+                    tool_result,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+
+                if len(tool_text) > VLLM_MAX_TOOL_OUTPUT_CHARS:
+                    tool_text = tool_text[:VLLM_MAX_TOOL_OUTPUT_CHARS]
+
+                messages.append(
+                    {
+                        "role": "assistant",
+                        "content": content,
+                    }
+                )
+
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            "Repository tool result:\n"
+                            + tool_text
+                            + "\nContinue the analysis. "
+                            "Request another tool or return the final result."
+                        ),
+                    }
+                )
+
+                continue
+
+            if allow_tools and successful_repo_reads == 0:
+                messages.append(
+                    {
+                        "role": "assistant",
+                        "content": content,
+                    }
+                )
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            "You have not successfully inspected any repository file yet. "
+                            "Do not return a final answer. Inspect the repository first. "
+                            "Use list_files or search_text to locate relevant source files, "
+                            "then use read_file. You must successfully read at least one "
+                            "relevant source file before concluding the analysis."
+                        ),
+                    }
+                )
+                continue
+
+            if isinstance(action, dict) and action.get("type") == "final":
+                # vLLM/Qwen emits the final Open-Kritt fields alongside
+                # type="final", rather than nesting them below "result".
+                if "result" in action:
+                    payload = action.get("result")
+                else:
+                    payload = {
+                        key: value
+                        for key, value in action.items()
+                        if key != "type"
+                    }
+            else:
+                # Also accept a direct schema-conforming JSON response.
+                payload = action
+
+            # Respect Open-Kritt single-output schemas.
+            #
+            # Post-scripts such as PoC Creator use results.maxItems = 1.
+            # Some locally served models may still emit multiple valid-looking
+            # results despite structured-output constraints. Keep the first
+            # result so the payload satisfies the schema expected by Kritt.
+            if isinstance(payload, dict):
+                results_schema = (
+                    schema.get("properties", {})
+                    .get("results", {})
+                )
+
+                results = payload.get("results")
+
+                if (
+                    isinstance(results_schema, dict)
+                    and results_schema.get("maxItems") == 1
+                    and isinstance(results, list)
+                    and len(results) > 1
+                ):
+                    LOGGER.info(
+                        "vLLM returned %s results for a single-output schema; "
+                        "keeping the first result",
+                        len(results),
+                    )
+                    payload["results"] = results[:1]
+
+                # Restore Open-Kritt's internal extractor marker.
+                payload[EXTRACTOR_HELPER_FIELD] = True
+
+            return HarnessResult(
+                payload=payload,
+                usage=usage_total or None,
+            )
+
+        raise HarnessError(
+            f"vLLM exceeded the {VLLM_MAX_TOOL_STEPS}-step repository inspection limit.",
+            code="invalid_output",
+            harness="vllm",
+        )
 
 def normalize_harness_name(name: str) -> str:
     if name == "codex-cli":
@@ -1858,6 +2711,7 @@ def harness_for(
 ):
     normalized = normalize_harness_name(name)
     provider = model_provider if model_provider is not None else codex_model_provider
+
     if normalized == "codex":
         return CodexHarness(
             timeout_seconds,
@@ -1866,8 +2720,17 @@ def harness_for(
             codex_model_provider=codex_model_provider,
             max_subagents=codex_max_subagents,
         )
+
     if normalized == "claude-code":
         return ClaudeHarness(timeout_seconds, provider)
+
+    if normalized == "vllm":
+        return VLLMHarness(
+            timeout_seconds,
+            provider,
+        )
+
     if normalized == "cursor":
         return CursorHarness(timeout_seconds, provider)
+
     raise HarnessError(f"unsupported harness {name!r}")
