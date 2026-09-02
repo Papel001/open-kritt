@@ -2171,6 +2171,61 @@ def _vllm_merge_usage(
 
 
 
+
+def _vllm_fill_missing_required_arrays(
+    value: Any,
+    value_schema: dict[str, Any],
+) -> None:
+    """Fill omitted required array fields only when [] is schema-valid."""
+
+    if not isinstance(value_schema, dict):
+        return
+
+    if isinstance(value, dict):
+        properties = value_schema.get("properties", {})
+        required = value_schema.get("required", [])
+
+        if not isinstance(properties, dict):
+            properties = {}
+
+        if not isinstance(required, list):
+            required = []
+
+        for field in required:
+            if field in value:
+                continue
+
+            field_schema = properties.get(field, {})
+
+            if (
+                isinstance(field_schema, dict)
+                and field_schema.get("type") == "array"
+                and field_schema.get("minItems", 0) == 0
+            ):
+                value[field] = []
+                LOGGER.info(
+                    "vLLM filled missing required array field=%s with empty array",
+                    field,
+                )
+
+        for field, field_schema in properties.items():
+            if field in value:
+                _vllm_fill_missing_required_arrays(
+                    value[field],
+                    field_schema,
+                )
+
+    elif isinstance(value, list):
+        item_schema = value_schema.get("items", {})
+
+        if isinstance(item_schema, dict):
+            for item in value:
+                _vllm_fill_missing_required_arrays(
+                    item,
+                    item_schema,
+                )
+
+
 def _vllm_turn_schema(
     final_schema: dict[str, Any],
     allow_tools: bool,
@@ -2657,6 +2712,9 @@ Do not use markdown fences.
             # Some locally served models may still emit multiple valid-looking
             # results despite structured-output constraints. Keep the first
             # result so the payload satisfies the schema expected by Kritt.
+            # Repair required array fields omitted by local models.
+            # Only use [] when the schema permits an empty array.
+            _vllm_fill_missing_required_arrays(payload, schema)
             if isinstance(payload, dict):
                 results_schema = (
                     schema.get("properties", {})

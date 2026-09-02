@@ -65,6 +65,7 @@ CLI has no install step.
 git clone https://github.com/Kritt-ai/open-kritt
 cd open-kritt
 ./kritt start
+
 ```
 
 Open [http://localhost:5173](http://localhost:5173) once the stack is running. You only
