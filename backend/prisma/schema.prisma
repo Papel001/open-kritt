@@ -143,10 +143,14 @@ model Scan {
   postScriptId  BigInt   @map("post_script_id")
   insertedAt    DateTime @default(now()) @map("inserted_at") @db.Timestamptz(6)
   updatedAt     DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
-  repoFull      String   @map("repo_full")
-  repoKind      String?  @map("repo_kind") // remote | local
-  commitSha     String   @map("commit_sha")
-  repoScope     String   @map("repo_scope")
+  targetKind      String  @default("repository") @map("target_kind") // repository | contract
+  contractAddress String? @map("contract_address")
+  chainId         Int?    @map("chain_id")
+
+  repoFull        String   @map("repo_full")
+  repoKind        String?  @map("repo_kind") // remote | local
+  commitSha       String   @map("commit_sha")
+  repoScope       String   @map("repo_scope")
   dependencies  String[] @map("dependencies") // legacy: addresses/names of each dependency
   dependenciesDetail Json? @map("dependencies_detail") // [{ kind, repo_full, commit_sha }]
   agentSkillIds BigInt[] @default([]) @map("agent_skill_ids")

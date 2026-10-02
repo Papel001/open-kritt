@@ -304,9 +304,15 @@ export function serializeScan(
   const agentSkillIds = (scan.agentSkillIds || []).map((id) => id.toString());
   return {
     id: scan.id.toString(),
+    targetKind: scan.targetKind ?? 'repository',
+    contractAddress: scan.contractAddress ?? null,
+    chainId: scan.chainId ?? null,
     repoFull: scan.repoFull,
-    repoKind: scan.repoKind ?? 'remote',
-    repoDisplay: repoDisplayName(scan.repoFull, scan.repoKind),
+    repoKind: (scan.targetKind ?? 'repository') === 'contract' ? null : (scan.repoKind ?? 'remote'),
+    repoDisplay:
+      (scan.targetKind ?? 'repository') === 'contract'
+        ? scan.contractAddress ?? scan.repoFull
+        : repoDisplayName(scan.repoFull, scan.repoKind),
     commitSha: commit,
     commitShort: commit.length > 7 ? commit.slice(0, 7) : commit,
     repoScope: scan.repoScope,

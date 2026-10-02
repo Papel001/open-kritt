@@ -26,6 +26,17 @@ const MODEL_CATALOG_RETRY_LIMIT = 25;
 const MODEL_CATALOG_RETRY_DELAY_MS = 1_000;
 
 const GITHUB_REPO_RE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+(?:\.git)?$/;
+const EVM_ADDRESS_RE = /^0x[a-fA-F0-9]{40}$/;
+
+const CONTRACT_CHAINS = [
+  ['1', 'Ethereum'],
+  ['42161', 'Arbitrum One'],
+  ['10', 'Optimism'],
+  ['8453', 'Base'],
+  ['137', 'Polygon'],
+  ['56', 'BNB Smart Chain'],
+  ['43114', 'Avalanche C-Chain'],
+];
 
 function normalizeGithubRepo(input) {
   const raw = (input ?? '').toString().trim();
@@ -88,6 +99,9 @@ export default function CreateScan() {
     postScriptId: '',
     postScriptIds: [],
     agentSkillIds: [],
+    targetKind: 'repository',
+    contractAddress: '',
+    chainId: '1',
     repoKind: 'remote',
     repoUrl: '',
     repoLocal: '',
@@ -414,7 +428,11 @@ export default function CreateScan() {
   };
 
   const repoUrlValid = isValidRemoteRepo(form.repoUrl.trim());
-  const targetValid = form.repoKind === 'remote' ? repoUrlValid : !!form.repoLocal;
+  const contractAddressValid = EVM_ADDRESS_RE.test(form.contractAddress.trim());
+  const chainIdValid = /^\d+$/.test(`${form.chainId}`.trim()) && Number(form.chainId) > 0;
+  const repositoryTargetValid = form.repoKind === 'remote' ? repoUrlValid : !!form.repoLocal;
+  const targetValid =
+    form.targetKind === 'contract' ? contractAddressValid && chainIdValid : repositoryTargetValid;
 
   const dependencyEmpty = (dep) => {
     if ((dep.kind || 'remote') === 'local') return !dep.repo_full;
@@ -511,9 +529,20 @@ export default function CreateScan() {
       workflowId: form.workflowId,
       postScriptId: selectedPostScriptIds[0],
       agentSkillIds: form.agentSkillIds,
-      repo_kind: form.repoKind,
-      repo_full: form.repoKind === 'remote' ? normalizeGithubRepo(form.repoUrl) : form.repoLocal,
-      commit_sha: form.repoKind === 'remote' ? form.commit_sha.trim() || 'HEAD' : undefined,
+      target_kind: form.targetKind,
+      contract_address: form.targetKind === 'contract' ? form.contractAddress.trim() : undefined,
+      chain_id: form.targetKind === 'contract' ? Number(form.chainId) : undefined,
+      repo_kind: form.targetKind === 'repository' ? form.repoKind : undefined,
+      repo_full:
+        form.targetKind === 'repository'
+          ? form.repoKind === 'remote'
+            ? normalizeGithubRepo(form.repoUrl)
+            : form.repoLocal
+          : undefined,
+      commit_sha:
+        form.targetKind === 'repository' && form.repoKind === 'remote'
+          ? form.commit_sha.trim() || 'HEAD'
+          : undefined,
       repo_scope: form.repo_scope,
       dependencies: normalizedDependencies(),
       configuration,
@@ -546,8 +575,10 @@ export default function CreateScan() {
         : selectedPostScriptIds.length === 0
           ? 'Select a post-script'
           : !targetValid
-            ? form.repoKind === 'remote'
-              ? 'Enter a valid repo'
+            ? form.targetKind === 'contract'
+              ? 'Enter a valid contract address and chain'
+              : form.repoKind === 'remote'
+                ? 'Enter a valid repo'
               : 'Select a local repository'
             : !dependenciesValid
               ? 'Fix dependency rows'
@@ -652,98 +683,186 @@ export default function CreateScan() {
 
           {/* ===================== TARGET ===================== */}
           <Label>2 · TARGET</Label>
+
           <Pills
-            value={form.repoKind}
-            onChange={(k) => set({ repoKind: k })}
+            value={form.targetKind}
+            onChange={(k) => set({ targetKind: k })}
             options={[
-              ['remote', 'Remote'],
-              ['local', 'Local'],
+              ['repository', 'Repository'],
+              ['contract', 'Contract Address'],
             ]}
           />
 
-          {form.repoKind === 'remote' ? (
+          {form.targetKind === 'contract' ? (
             <div
               className="create-scan-two-column"
-              style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: 12, marginBottom: 12 }}
+              style={{ display: 'grid', gridTemplateColumns: '1fr 2fr', gap: 12, marginBottom: 28 }}
             >
-              <Field label="repository">
-                <Input
-                  value={form.repoUrl}
-                  onChange={(e) => set({ repoUrl: e.target.value })}
-                  onBlur={() => set({ repoUrl: formatRemoteRepoInput(form.repoUrl) })}
-                  placeholder="https://github.com/org/repo"
-                  mono
-                  style={{ borderColor: form.repoUrl && !repoUrlValid ? 'var(--fail)' : 'var(--border)' }}
-                />
-                {form.repoUrl && !repoUrlValid && <FieldError>Use owner/repo or a GitHub URL.</FieldError>}
+              <Field label="network">
+                <select
+                  value={form.chainId}
+                  onChange={(e) => set({ chainId: e.target.value })}
+                  style={{
+                    width: '100%',
+                    height: 38,
+                    border: '1px solid var(--border)',
+                    borderRadius: 7,
+                    background: 'var(--surface)',
+                    color: 'var(--text)',
+                    padding: '0 10px',
+                  }}
+                >
+                  {CONTRACT_CHAINS.map(([id, label]) => (
+                    <option key={id} value={id}>
+                      {label}
+                    </option>
+                  ))}
+                </select>
               </Field>
-              <Field label="commit_sha">
+
+              <Field label="contract address">
                 <Input
-                  value={form.commit_sha}
-                  onChange={(e) => set({ commit_sha: e.target.value })}
-                  placeholder="HEAD"
+                  value={form.contractAddress}
+                  onChange={(e) => set({ contractAddress: e.target.value })}
+                  placeholder="0x..."
                   mono
+                  style={{
+                    borderColor:
+                      form.contractAddress && !contractAddressValid
+                        ? 'var(--fail)'
+                        : 'var(--border)',
+                  }}
                 />
+                {form.contractAddress && !contractAddressValid && (
+                  <FieldError>Enter a valid EVM contract address.</FieldError>
+                )}
               </Field>
             </div>
           ) : (
-            <div style={{ marginBottom: 12 }}>
-              <Field label="local repository">
-                <SearchSelect
-                  height={38}
-                  items={localItems}
-                  value={form.repoLocal}
-                  onChange={(name) => set({ repoLocal: name })}
-                  placeholder="Search local repos…"
-                  emptyText="No local repos found under the configured root."
-                  renderTrigger={(r) => (
-                    <span style={{ display: 'flex', alignItems: 'center', gap: 9, minWidth: 0 }}>
-                      <span className="mono" style={{ fontSize: 13, color: r ? 'var(--text)' : 'var(--text-3)' }}>
-                        {r?.name || 'Select a local repository'}
-                      </span>
-                      {r && (
-                        <span className="mono" style={{ fontSize: 11, color: 'var(--text-3)' }}>
-                          {localMeta(r)}
+            <>
+              <Pills
+                value={form.repoKind}
+                onChange={(k) => set({ repoKind: k })}
+                options={[
+                  ['remote', 'Remote'],
+                  ['local', 'Local'],
+                ]}
+              />
+
+              {form.repoKind === 'remote' ? (
+                <div
+                  className="create-scan-two-column"
+                  style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: 12, marginBottom: 12 }}
+                >
+                  <Field label="repository">
+                    <Input
+                      value={form.repoUrl}
+                      onChange={(e) => set({ repoUrl: e.target.value })}
+                      onBlur={() => set({ repoUrl: formatRemoteRepoInput(form.repoUrl) })}
+                      placeholder="https://github.com/org/repo"
+                      mono
+                      style={{
+                        borderColor:
+                          form.repoUrl && !repoUrlValid
+                            ? 'var(--fail)'
+                            : 'var(--border)',
+                      }}
+                    />
+                    {form.repoUrl && !repoUrlValid && (
+                      <FieldError>Use owner/repo or a GitHub URL.</FieldError>
+                    )}
+                  </Field>
+
+                  <Field label="commit_sha">
+                    <Input
+                      value={form.commit_sha}
+                      onChange={(e) => set({ commit_sha: e.target.value })}
+                      placeholder="HEAD"
+                      mono
+                    />
+                  </Field>
+                </div>
+              ) : (
+                <div style={{ marginBottom: 12 }}>
+                  <Field label="local repository">
+                    <SearchSelect
+                      height={38}
+                      items={localItems}
+                      value={form.repoLocal}
+                      onChange={(name) => set({ repoLocal: name })}
+                      placeholder="Search local repos…"
+                      emptyText="No local repos found under the configured root."
+                      renderTrigger={(r) => (
+                        <span style={{ display: 'flex', alignItems: 'center', gap: 9, minWidth: 0 }}>
+                          <span
+                            className="mono"
+                            style={{
+                              fontSize: 13,
+                              color: r ? 'var(--text)' : 'var(--text-3)',
+                            }}
+                          >
+                            {r?.name || 'Select a local repository'}
+                          </span>
+                          {r && (
+                            <span
+                              className="mono"
+                              style={{ fontSize: 11, color: 'var(--text-3)' }}
+                            >
+                              {localMeta(r)}
+                            </span>
+                          )}
                         </span>
                       )}
-                    </span>
-                  )}
-                  renderItem={(r) => (
-                    <div style={{ minWidth: 0 }}>
-                      <div className="mono" style={{ fontWeight: 600, fontSize: 12.5 }}>
-                        {r.name}
-                      </div>
-                      <div className="mono" style={{ fontSize: 10.5, color: 'var(--text-3)', marginTop: 2 }}>
-                        {r.path} · {localMeta(r) || 'not a git repo'}
-                      </div>
-                    </div>
-                  )}
-                  filter={(r, q) => r.name.toLowerCase().includes(q)}
-                />
-              </Field>
-              <LocalRepoFilePreflight
-                stats={localRepoFileStats}
-                repoName={form.repoLocal}
-                configuration={form.configuration}
-                onRetry={() => setLocalRepoFileStatsRetry((attempt) => attempt + 1)}
-              />
-              <div
-                style={{
-                  display: 'flex',
-                  alignItems: 'flex-start',
-                  gap: 7,
-                  fontSize: 11.5,
-                  color: 'var(--text-3)',
-                  marginTop: 7,
-                  lineHeight: 1.5,
-                }}
-              >
-                <span style={{ flex: 'none' }}>ⓘ</span>
-                At scan start, open·kritt takes one snapshot of this folder, including modified and untracked files but
-                excluding .git. Git is not required. The selected model provider receives the snapshot contents; create
-                a new scan to capture later changes.
-              </div>
-            </div>
+                      renderItem={(r) => (
+                        <div style={{ minWidth: 0 }}>
+                          <div
+                            className="mono"
+                            style={{ fontWeight: 600, fontSize: 12.5 }}
+                          >
+                            {r.name}
+                          </div>
+                          <div
+                            className="mono"
+                            style={{
+                              fontSize: 10.5,
+                              color: 'var(--text-3)',
+                              marginTop: 2,
+                            }}
+                          >
+                            {r.path} · {localMeta(r) || 'not a git repo'}
+                          </div>
+                        </div>
+                      )}
+                      filter={(r, q) => r.name.toLowerCase().includes(q)}
+                    />
+                  </Field>
+
+                  <LocalRepoFilePreflight
+                    stats={localRepoFileStats}
+                    repoName={form.repoLocal}
+                    configuration={form.configuration}
+                    onRetry={() => setLocalRepoFileStatsRetry((attempt) => attempt + 1)}
+                  />
+
+                  <div
+                    style={{
+                      display: 'flex',
+                      alignItems: 'flex-start',
+                      gap: 7,
+                      fontSize: 11.5,
+                      color: 'var(--text-3)',
+                      marginTop: 7,
+                      lineHeight: 1.5,
+                    }}
+                  >
+                    <span style={{ flex: 'none' }}>ⓘ</span>
+                    At scan start, open·kritt takes one snapshot of this folder, including modified and untracked files but
+                    excluding .git. Git is not required. The selected model provider receives the snapshot contents; create
+                    a new scan to capture later changes.
+                  </div>
+                </div>
+              )}
+            </>
           )}
 
           <div style={{ marginBottom: 28 }}>

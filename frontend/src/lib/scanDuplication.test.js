@@ -56,6 +56,9 @@ describe('scanConfigurationDraft', () => {
       postScriptId: '21',
       postScriptIds: ['21', '22'],
       agentSkillIds: ['31', '32'],
+      targetKind: 'repository',
+      contractAddress: '',
+      chainId: '1',
       repoKind: 'remote',
       repoUrl: 'open-kritt/example',
       repoLocal: '',
@@ -92,6 +95,40 @@ describe('scanConfigurationDraft', () => {
 
     draft.extra.threat_model.actor = 'changed';
     expect(source.extra.threat_model.actor).toBe('anonymous user');
+  });
+
+
+  it('preserves contract target fields when duplicating a contract scan', () => {
+    const draft = scanConfigurationDraft({
+      workflowId: '6',
+      postScriptId: '5',
+      targetKind: 'contract',
+      contractAddress: '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2',
+      chainId: 1,
+      repoKind: null,
+      repoFull: '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2',
+      commitSha: 'ONCHAIN',
+      repoScope: 'verified contract source',
+      configuration: {},
+      dependencies: [],
+      model: 'gpt-5.5',
+      modelProvider: 'codex',
+      harness: 'codex',
+      thinkingEffort: 'medium',
+      postProcessingThinkingEffort: 'medium',
+      modelOverrides: {},
+      extra: {},
+      severityRanker: 'Rank by impact.',
+    });
+
+    expect(draft.targetKind).toBe('contract');
+    expect(draft.contractAddress).toBe('0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2');
+    expect(draft.chainId).toBe('1');
+    expect(draft.repoKind).toBe('remote');
+    expect(draft.repoUrl).toBe('');
+    expect(draft.repoLocal).toBe('');
+    expect(draft.commit_sha).toBe('');
+    expect(draft.repo_scope).toBe('verified contract source');
   });
 
   it('supports local targets and legacy expanded relationship records', () => {

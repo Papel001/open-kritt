@@ -519,6 +519,9 @@ router.post('/', async (req, res, next) => {
         data: {
           workflowId: workflow.id,
           postScriptId: postScript.id,
+          targetKind: valid.targetKind,
+          contractAddress: valid.contractAddress,
+          chainId: valid.chainId,
           repoFull: valid.repoFull,
           repoKind: valid.repoKind,
           commitSha: valid.commitSha,

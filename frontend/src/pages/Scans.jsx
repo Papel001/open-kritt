@@ -151,7 +151,7 @@ export default function Scans() {
       {pageData && pageData.totalItems === 0 && (
         <EmptyState
           title="No scans here"
-          sub="Queue a scan by pointing a workflow at a repository."
+          sub="Queue a scan against a repository or verified smart contract source."
           action={<Button to="/scans?new=1">+ New scan</Button>}
         />
       )}
@@ -301,7 +301,11 @@ function NewScanDialog({ onClose }) {
                         modelOverrideCount
                           ? `${modelOverrideCount} depth override${modelOverrideCount === 1 ? '' : 's'}`
                           : null,
-                        scan.repoKind === 'local' ? 'local snapshot' : null,
+                        scan.targetKind === 'contract'
+                          ? `chain ${scan.chainId}`
+                          : scan.repoKind === 'local'
+                            ? 'local snapshot'
+                            : null,
                         scan.age ? `${scan.age} ago` : null,
                       ]
                         .filter(Boolean)
@@ -487,7 +491,12 @@ function ScanCard({ scan, to, onResume, onToggleError, onDelete, busy, errorExpa
         {scan.workflowName} · {scan.model}
         {modelOverrideCount
           ? ` · ${modelOverrideCount} depth override${modelOverrideCount === 1 ? '' : 's'}`
-          : ''} · {scan.repoKind === 'local' ? 'local snapshot' : scan.commitShort}
+          : ''} ·{' '}
+        {scan.targetKind === 'contract'
+          ? `chain ${scan.chainId}`
+          : scan.repoKind === 'local'
+            ? 'local snapshot'
+            : scan.commitShort}
       </div>
 
       {providerAutoscale && (

@@ -482,6 +482,126 @@ test('validateScan labels local repository contents as a snapshot, not a Git rev
   assert.equal(valid.dependencies[0].commitSha, 'LOCAL_SNAPSHOT');
 });
 
+
+test('validateScan defaults to a repository target', () => {
+  const valid = validateScan({
+    workflowId: '1',
+    postScriptId: '1',
+    repo_kind: 'remote',
+    repo_full: 'https://github.com/org/repo',
+    commit_sha: 'HEAD',
+    model: 'gpt-5.5',
+    harness: 'codex',
+    severity_ranker: 'Rank by impact.',
+  });
+
+  assert.equal(valid.targetKind, 'repository');
+  assert.equal(valid.contractAddress, null);
+  assert.equal(valid.chainId, null);
+  assert.equal(valid.repoFull, 'org/repo');
+  assert.equal(valid.repoKind, 'remote');
+  assert.equal(valid.commitSha, 'HEAD');
+});
+
+test('validateScan accepts a valid contract target', () => {
+  const address = '0x1234567890abcdef1234567890abcdef12345678';
+
+  const valid = validateScan({
+    workflowId: '1',
+    postScriptId: '1',
+    target_kind: 'contract',
+    contract_address: address,
+    chain_id: 1,
+    model: 'gpt-5.5',
+    harness: 'codex',
+    severity_ranker: 'Rank by impact.',
+  });
+
+  assert.equal(valid.targetKind, 'contract');
+  assert.equal(valid.contractAddress, address);
+  assert.equal(valid.chainId, 1);
+  assert.equal(valid.repoFull, address);
+  assert.equal(valid.repoKind, null);
+  assert.equal(valid.commitSha, 'ONCHAIN');
+});
+
+test('validateScan rejects a missing contract address', () => {
+  assert.throws(
+    () =>
+      validateScan({
+        workflowId: '1',
+        postScriptId: '1',
+        target_kind: 'contract',
+        chain_id: 1,
+        model: 'gpt-5.5',
+        harness: 'codex',
+        severity_ranker: 'Rank by impact.',
+      }),
+    (error) =>
+      error instanceof ValidationError &&
+      error.errors.some((item) => item.field === 'contract_address')
+  );
+});
+
+test('validateScan rejects a malformed contract address', () => {
+  assert.throws(
+    () =>
+      validateScan({
+        workflowId: '1',
+        postScriptId: '1',
+        target_kind: 'contract',
+        contract_address: '0x1234',
+        chain_id: 1,
+        model: 'gpt-5.5',
+        harness: 'codex',
+        severity_ranker: 'Rank by impact.',
+      }),
+    (error) =>
+      error instanceof ValidationError &&
+      error.errors.some((item) => item.field === 'contract_address')
+  );
+});
+
+test('validateScan rejects invalid contract chain IDs', () => {
+  for (const chainId of ['', 0, -1, 'abc']) {
+    assert.throws(
+      () =>
+        validateScan({
+          workflowId: '1',
+          postScriptId: '1',
+          target_kind: 'contract',
+          contract_address: '0x1234567890abcdef1234567890abcdef12345678',
+          chain_id: chainId,
+          model: 'gpt-5.5',
+          harness: 'codex',
+          severity_ranker: 'Rank by impact.',
+        }),
+      (error) =>
+        error instanceof ValidationError &&
+        error.errors.some((item) => item.field === 'chain_id')
+    );
+  }
+});
+
+test('validateScan rejects an unknown target kind', () => {
+  assert.throws(
+    () =>
+      validateScan({
+        workflowId: '1',
+        postScriptId: '1',
+        target_kind: 'website',
+        repo_kind: 'remote',
+        repo_full: 'org/repo',
+        model: 'gpt-5.5',
+        harness: 'codex',
+        severity_ranker: 'Rank by impact.',
+      }),
+    (error) =>
+      error instanceof ValidationError &&
+      error.errors.some((item) => item.field === 'target_kind')
+  );
+});
+
 test('validateScan enforces model provider and harness compatibility after normalization', () => {
   const base = {
     workflowId: '1',

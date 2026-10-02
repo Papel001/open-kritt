@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from .claude_auth import CLAUDE_OAUTH_EXPIRY_ENV, prepare_claude_job_credentials
+from .contract_source import CONTRACT_REVISION, materialize_contract_source
 from .provider_credentials import job_environment
 from .repository import (
     LOCAL_SNAPSHOT_REVISION,
@@ -329,6 +330,13 @@ def cleanup_workspace(workspace: JobWorkspace):
     shutil.rmtree(workspace.root_dir, ignore_errors=True)
 
 
+
+def _scan_primary_kind(scan: dict[str, Any]) -> str:
+    if (scan.get("target_kind") or scan.get("targetKind")) == "contract":
+        return "contract"
+    return scan.get("repo_kind") or scan.get("repoKind") or "remote"
+
+
 def prepare_dependency_workspace(
     *,
     data_dir: str,
@@ -434,7 +442,7 @@ def _prepare_dependency_snapshot_workspace(
     github_token: str | None,
     timings: dict[str, int] | None = None,
 ) -> DependencyWorkspace:
-    primary_kind = scan.get("repo_kind") or "remote"
+    primary_kind = _scan_primary_kind(scan)
     requested_commit = _requested_revision(primary_kind, scan.get("commit_sha"))
     cache_started = time.perf_counter()
     primary_cache_checkout, checked_out_commit = _checkout_scan_repo_to_cache(
@@ -444,6 +452,7 @@ def _prepare_dependency_snapshot_workspace(
         commit_sha=requested_commit,
         github_token=github_token,
         scan_id=scan.get("id"),
+        chain_id=scan.get("chain_id") or scan.get("chainId"),
     )
     _add_timing(timings, "checkout_cache_ms", _elapsed_ms(cache_started))
 
@@ -486,6 +495,11 @@ def _prepare_dependency_snapshot_workspace(
         "primary": {
             "kind": primary_kind,
             "repo": scan["repo_full"],
+            "chain_id": (
+                scan.get("chain_id") or scan.get("chainId")
+                if primary_kind == "contract"
+                else None
+            ),
             "requested_commit": requested_commit,
             "commit": checked_out_commit,
             "path": SCAN_RUNNER_WORKDIR,
@@ -532,7 +546,7 @@ def _prepare_dependency_workspace_tree(
     hardlink_worktree: bool,
     timings: dict[str, int] | None = None,
 ) -> PreparedWorkspaceTree:
-    primary_kind = scan.get("repo_kind") or "remote"
+    primary_kind = _scan_primary_kind(scan)
     requested_commit = _requested_revision(primary_kind, scan.get("commit_sha"))
     cache_started = time.perf_counter()
     primary_cache_checkout, checked_out_commit = _checkout_scan_repo_to_cache(
@@ -542,12 +556,16 @@ def _prepare_dependency_workspace_tree(
         commit_sha=requested_commit,
         github_token=github_token,
         scan_id=scan.get("id"),
+        chain_id=scan.get("chain_id") or scan.get("chainId"),
     )
     _add_timing(timings, "checkout_cache_ms", _elapsed_ms(cache_started))
 
     copy_started = time.perf_counter()
     if primary_kind == "local":
         repo_dir, checked_out_commit = copy_local_snapshot(primary_cache_checkout, str(target_dir))
+    elif primary_kind == "contract":
+        repo_dir, _ = copy_local_snapshot(primary_cache_checkout, str(target_dir))
+        checked_out_commit = CONTRACT_REVISION
     else:
         repo_dir, checked_out_commit = copy_checkout(
             primary_cache_checkout,
@@ -605,6 +623,11 @@ def _prepare_dependency_workspace_tree(
         "primary": {
             "kind": primary_kind,
             "repo": scan["repo_full"],
+            "chain_id": (
+                scan.get("chain_id") or scan.get("chainId")
+                if primary_kind == "contract"
+                else None
+            ),
             "requested_commit": requested_commit,
             "commit": checked_out_commit,
             "path": repo_dir,
@@ -634,7 +657,7 @@ def prewarm_scan_checkout_cache(
 ) -> dict[str, Any]:
     scan = resolve_scan_checkout_revisions(scan, github_token=github_token, data_dir=data_dir)
     cache_dir = _checkout_cache_dir(checkout_cache_dir)
-    primary_kind = scan.get("repo_kind") or "remote"
+    primary_kind = _scan_primary_kind(scan)
     requested_commit = _requested_revision(primary_kind, scan.get("commit_sha"))
     primary_path, primary_commit = _checkout_scan_repo_to_cache(
         cache_dir=cache_dir,
@@ -643,6 +666,7 @@ def prewarm_scan_checkout_cache(
         commit_sha=requested_commit,
         github_token=github_token,
         scan_id=scan.get("id"),
+        chain_id=scan.get("chain_id") or scan.get("chainId"),
     )
     dependencies = []
     for dep in _scan_dependencies(scan):
@@ -673,6 +697,11 @@ def prewarm_scan_checkout_cache(
         "primary": {
             "kind": primary_kind,
             "repo": scan["repo_full"],
+            "chain_id": (
+                scan.get("chain_id") or scan.get("chainId")
+                if primary_kind == "contract"
+                else None
+            ),
             "requested_commit": requested_commit,
             "commit": primary_commit,
             "cache_path": primary_path,
@@ -691,7 +720,7 @@ def primary_checkout_cache_path(
     """Return the ready primary checkout shared by per-job workspaces."""
 
     scan = resolve_scan_checkout_revisions(scan, github_token=github_token, data_dir=data_dir)
-    kind = scan.get("repo_kind") or "remote"
+    kind = _scan_primary_kind(scan)
     requested_commit = _requested_revision(kind, scan.get("commit_sha"))
     cache_base = _checkout_cache_base(
         _checkout_cache_dir(checkout_cache_dir),
@@ -791,10 +820,11 @@ def save_persistent_scan_checkout_cache(
 
 
 def scan_checkout_cache_key(scan: dict[str, Any]) -> str:
-    primary_kind = scan.get("repo_kind") or "remote"
+    primary_kind = _scan_primary_kind(scan)
     value = {
         "repo_kind": primary_kind,
         "repo_full": scan.get("repo_full"),
+        "chain_id": (scan.get("chain_id") or scan.get("chainId")) if primary_kind == "contract" else None,
         "commit_sha": _requested_revision(primary_kind, scan.get("commit_sha")),
         "scan_id": scan.get("id") if primary_kind == "local" else None,
         "dependencies": _scan_dependencies(scan),
@@ -824,7 +854,7 @@ def scan_checkout_cache_entry_prefixes(scan: dict[str, Any]) -> set[str]:
 
 
 def _has_remote_head(scan: dict[str, Any]) -> bool:
-    primary_kind = scan.get("repo_kind") or "remote"
+    primary_kind = _scan_primary_kind(scan)
     if primary_kind != "local" and _requested_revision(primary_kind, scan.get("commit_sha")).upper() == "HEAD":
         return True
     return any(
@@ -916,7 +946,7 @@ def resolve_scan_checkout_revisions(
                     if _resolved_revisions_are_concrete(resolved):
                         return resolved
 
-            primary_kind = scan.get("repo_kind") or "remote"
+            primary_kind = _scan_primary_kind(scan)
             primary_commit = scan.get("commit_sha")
             if primary_kind != "local" and _requested_revision(primary_kind, primary_commit).upper() == "HEAD":
                 primary_commit = resolve_remote_head(scan["repo_full"], github_token)
@@ -1115,7 +1145,7 @@ def _persistent_scan_checkout_cache_dir(checkout_cache_persist_dir: str, scan: d
 
 
 def _scan_cache_bases(cache_dir: Path, scan: dict[str, Any]) -> list[Path]:
-    primary_kind = scan.get("repo_kind") or "remote"
+    primary_kind = _scan_primary_kind(scan)
     bases = [
         _checkout_cache_base(
             cache_dir,
@@ -1159,6 +1189,7 @@ def _checkout_scan_repo_to_cache(
     commit_sha: str,
     github_token: str | None,
     scan_id: Any | None,
+    chain_id: Any | None = None,
 ) -> tuple[str, str]:
     cache_base = _checkout_cache_base(cache_dir, repo_full, commit_sha, kind=kind, scan_id=scan_id)
     ready = _read_ready_cache_checkout(cache_base)
@@ -1170,6 +1201,8 @@ def _checkout_scan_repo_to_cache(
 
     if kind == "local":
         repo_dir, checked_out = snapshot_local_repo(repo_full, str(cache_base), os.getenv("LOCAL_REPOS_PATH"))
+    elif kind == "contract":
+        repo_dir, checked_out = materialize_contract_source(repo_full, chain_id, cache_base)
     else:
         repo_dir, checked_out = checkout_repo(repo_full, commit_sha, str(cache_base), github_token)
     _write_ready_cache_checkout(cache_base, repo_dir, checked_out, kind=kind)
@@ -1297,6 +1330,10 @@ def _checkout_cache_base(
         repo_digest = hashlib.sha256(str(repo_full or "").encode("utf-8")).hexdigest()[:10]
         scan_part = _safe_alias(str(scan_id)) if scan_id is not None else "unscoped"
         return cache_dir / f"local__scan-{scan_part}__{repo_part}-{repo_digest}@{LOCAL_SNAPSHOT_REVISION}"
+    if kind == "contract":
+        address_part = _safe_alias(str(repo_full or "contract").lower())[:80]
+        scan_part = _safe_alias(str(scan_id)) if scan_id is not None else "unscoped"
+        return cache_dir / f"contract__scan-{scan_part}__{address_part}@{CONTRACT_REVISION}"
     normalized = normalize_repo_full(repo_full).rstrip("/").removesuffix(".git")
     repo_part = _safe_alias(normalized.replace("/", "__"))
     commit_part = _safe_alias(commit_sha or "HEAD")
@@ -1306,6 +1343,8 @@ def _checkout_cache_base(
 def _requested_revision(kind: str, commit_sha: Any | None) -> str:
     if kind == "local":
         return LOCAL_SNAPSHOT_REVISION
+    if kind == "contract":
+        return CONTRACT_REVISION
     return str(commit_sha or "HEAD")
 
 

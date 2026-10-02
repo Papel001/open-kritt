@@ -543,6 +543,53 @@ def test_prepare_dependency_workspace_writes_manifest_and_layout(monkeypatch, tm
     assert "Trace attacker input to sinks." in bundle_text
 
 
+
+def test_prepare_contract_workspace_preserves_onchain_revision(monkeypatch, tmp_path):
+    address = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
+
+    def fake_materialize_contract_source(contract_address, chain_id, cache_base):
+        assert contract_address == address
+        assert chain_id == 1
+        source = Path(cache_base) / "source"
+        source.mkdir(parents=True, exist_ok=True)
+        (source / "Contract.sol").write_text(
+            "contract Contract {}\n",
+            encoding="utf-8",
+        )
+        return str(source), "ONCHAIN"
+
+    monkeypatch.setattr(
+        workspace_module,
+        "materialize_contract_source",
+        fake_materialize_contract_source,
+    )
+
+    prepared = prepare_dependency_workspace(
+        data_dir=str(tmp_path / "data"),
+        checkout_cache_dir=str(tmp_path / "cache"),
+        metadata_id=420,
+        scan={
+            **scan(),
+            "id": 35,
+            "target_kind": "contract",
+            "contract_address": address,
+            "chain_id": 1,
+            "repo_kind": None,
+            "repo_full": address,
+            "commit_sha": "ONCHAIN",
+            "dependencies_detail": [],
+        },
+    )
+
+    assert prepared.checked_out_commit == "ONCHAIN"
+    assert prepared.manifest["primary"]["kind"] == "contract"
+    assert prepared.manifest["primary"]["repo"] == address
+    assert prepared.manifest["primary"]["chain_id"] == 1
+    assert prepared.manifest["primary"]["requested_commit"] == "ONCHAIN"
+    assert prepared.manifest["primary"]["commit"] == "ONCHAIN"
+    assert (Path(prepared.repo_dir) / "Contract.sol").is_file()
+
+
 def test_prepare_dependency_workspace_uses_cached_snapshot_image_without_copying_worktree(monkeypatch, tmp_path):
     def fake_checkout_repo(repo_full, commit_sha, base_dir, github_token=None):
         path = Path(base_dir) / repo_full.replace("/", "__")

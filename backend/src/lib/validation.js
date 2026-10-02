@@ -37,7 +37,9 @@ import {
   multiOutputDepthKey,
   isMultiOutputDepthKey,
 } from './constants.js';
-
+const TARGET_KINDS = ['repository', 'contract'];
+const EVM_ADDRESS_RE = /^0x[a-fA-F0-9]{40}$/;
+const CONTRACT_REVISION = 'ONCHAIN';
 class ValidationError extends Error {
   constructor(errors) {
     super('Validation failed');
@@ -695,12 +697,56 @@ export function validateScan(body, { localNames = null } = {}) {
   }
 
   // Target repo (remote git URL, or a local folder under LOCAL_REPOS_PATH).
-  const target = normalizeRepoRef(
-    { kind: body?.repo_kind ?? body?.repoKind, repo_full: body?.repo_full, commit_sha: body?.commit_sha },
-    localNames,
-    push,
-    'target'
-  );
+  // Primary scan target: either a repository or an on-chain contract.
+  const rawTargetKind = (body?.target_kind ?? body?.targetKind ?? 'repository').toString().trim().toLowerCase();
+  const targetKind = TARGET_KINDS.includes(rawTargetKind) ? rawTargetKind : 'repository';
+
+  if (!TARGET_KINDS.includes(rawTargetKind)) {
+    push('target_kind', `Target kind must be one of: ${TARGET_KINDS.join(', ')}.`);
+  }
+
+  let contractAddress = null;
+  let chainId = null;
+  let target;
+
+  if (rawTargetKind === 'contract') {
+    contractAddress = (body?.contract_address ?? body?.contractAddress ?? '').toString().trim();
+
+    if (!contractAddress) {
+      push('contract_address', 'A contract address is required.');
+    } else if (!EVM_ADDRESS_RE.test(contractAddress)) {
+      push('contract_address', 'Enter a valid EVM contract address beginning with 0x followed by 40 hexadecimal characters.');
+    }
+
+    const rawChainId = body?.chain_id ?? body?.chainId;
+    const chainText = rawChainId === undefined || rawChainId === null ? '' : `${rawChainId}`.trim();
+
+    if (!/^\d+$/.test(chainText)) {
+      push('chain_id', 'A valid chain ID is required.');
+    } else {
+      const parsedChainId = Number(chainText);
+      if (!Number.isSafeInteger(parsedChainId) || parsedChainId <= 0) {
+        push('chain_id', 'Chain ID must be a positive integer.');
+      } else {
+        chainId = parsedChainId;
+      }
+    }
+
+    // Compatibility values keep the existing non-null repository
+    // columns populated for contract scan records.
+    target = {
+      kind: null,
+      repoFull: contractAddress,
+      commitSha: CONTRACT_REVISION,
+    };
+  } else {
+    target = normalizeRepoRef(
+      { kind: body?.repo_kind ?? body?.repoKind, repo_full: body?.repo_full, commit_sha: body?.commit_sha },
+      localNames,
+      push,
+      'target'
+    );
+  }
 
   const selection = modelSelectionValidation(body);
   errors.push(...selection.errors);
@@ -777,9 +823,12 @@ export function validateScan(body, { localNames = null } = {}) {
 
   if (errors.length) throw new ValidationError(errors);
 
-  return {
+ return {
     workflowId,
     postScriptId,
+    targetKind,
+    contractAddress,
+    chainId,
     repoKind: target.kind,
     repoFull: target.repoFull,
     commitSha: target.commitSha,

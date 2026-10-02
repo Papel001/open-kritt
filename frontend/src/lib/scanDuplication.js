@@ -56,6 +56,7 @@ function duplicateDependencies(dependencies) {
 export function scanConfigurationDraft(scan) {
   if (!scan || typeof scan !== 'object') throw new TypeError('A source scan is required.');
 
+  const targetKind = scan.targetKind === 'contract' ? 'contract' : 'repository';
   const repoKind = scan.repoKind === 'local' ? 'local' : 'remote';
   const selectedPostScriptIds = postScriptIds(scan);
 
@@ -64,10 +65,13 @@ export function scanConfigurationDraft(scan) {
     postScriptId: selectedPostScriptIds[0] || '',
     postScriptIds: selectedPostScriptIds,
     agentSkillIds: agentSkillIds(scan),
+    targetKind,
+    contractAddress: targetKind === 'contract' ? `${scan.contractAddress ?? scan.repoFull ?? ''}` : '',
+    chainId: targetKind === 'contract' ? `${scan.chainId ?? '1'}` : '1',
     repoKind,
-    repoUrl: repoKind === 'remote' ? `${scan.repoFull ?? ''}` : '',
-    repoLocal: repoKind === 'local' ? `${scan.repoFull ?? ''}` : '',
-    commit_sha: repoKind === 'remote' ? `${scan.commitSha ?? ''}` : '',
+    repoUrl: targetKind === 'repository' && repoKind === 'remote' ? `${scan.repoFull ?? ''}` : '',
+    repoLocal: targetKind === 'repository' && repoKind === 'local' ? `${scan.repoFull ?? ''}` : '',
+    commit_sha: targetKind === 'repository' && repoKind === 'remote' ? `${scan.commitSha ?? ''}` : '',
     repo_scope: `${scan.repoScope ?? ''}`,
     dependencies: duplicateDependencies(scan.dependencies),
     configuration: editableConfiguration(scan.configuration),

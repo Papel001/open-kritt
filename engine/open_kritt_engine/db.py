@@ -1750,7 +1750,8 @@ class Database:
     def load_active_scan_cache_specs(self, conn) -> list[dict[str, Any]]:
         return conn.execute(
             """
-            SELECT id, repo_kind, repo_full, commit_sha, dependencies, dependencies_detail
+            SELECT id, target_kind, contract_address, chain_id,
+                   repo_kind, repo_full, commit_sha, dependencies, dependencies_detail
             FROM public.scans
             WHERE status IN ('queued', 'pending', 'prewarming_cache', 'running', 'rate_limited', 'post_processing')
             """
